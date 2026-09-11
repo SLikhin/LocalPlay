@@ -21,7 +21,7 @@ import androidx.room.RoomDatabase
 @Database(
     entities = [SongEntity::class],
     version = 1,
-    exportSchema = true,
+    exportSchema = false,   // set to true and configure the Room Gradle plugin when you need schema history
 )
 abstract class LocalPlayDatabase : RoomDatabase() {
 

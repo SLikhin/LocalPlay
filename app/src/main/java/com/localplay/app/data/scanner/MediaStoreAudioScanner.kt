@@ -3,9 +3,11 @@ package com.localplay.app.data.scanner
 import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import androidx.annotation.RequiresApi
 import com.localplay.app.data.db.SongEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -15,20 +17,26 @@ import kotlinx.coroutines.withContext
  * each row to a [SongEntity].
  *
  * ### Column availability
- * The columns [MediaStore.Audio.Media.SAMPLERATE],
- * [MediaStore.Audio.Media.BITS_PER_SAMPLE], and
- * [MediaStore.Audio.Media.CAPTURE_FRAMERATE] were added in API 29. On older
- * devices these columns are simply not projected and the resulting fields in
- * [SongEntity] will be `null`.
+ *
+ * | Column | API | SDK constant |
+ * |---|---|---|
+ * | Sample rate | 29+ | no named constant — raw string `"samplerate"` |
+ * | Bits per sample | 29+ | [MediaStore.Audio.AudioColumns.BITS_PER_SAMPLE] |
+ * | Channel count | any | [MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER] |
+ *
+ * `SAMPLERATE` has no named constant in `MediaStore.Audio.Media` or
+ * `MediaStore.Audio.AudioColumns`; the raw column name `"samplerate"` is used
+ * instead. `CAPTURE_FRAMERATE` is a `VideoColumns` constant and is never
+ * populated on audio rows; channel count is therefore read exclusively via
+ * [MediaMetadataRetriever].
  *
  * ### Content URI
- * Uses [MediaStore.Audio.Media.EXTERNAL_CONTENT_URI] to scan the shared
- * external storage. Internal storage is included automatically by MediaStore
- * on modern Android.
+ * Uses [MediaStore.Audio.Media.EXTERNAL_CONTENT_URI] which covers both external
+ * and (on modern Android) internal storage volumes.
  *
  * ### Permissions required
  * - API 33+: `READ_MEDIA_AUDIO`
- * - API 29–32: `READ_EXTERNAL_STORAGE`
+ * - API 26–32: `READ_EXTERNAL_STORAGE`
  *
  * The caller is responsible for checking/requesting permissions before
  * invoking [scan].
@@ -37,9 +45,7 @@ class MediaStoreAudioScanner(private val context: Context) {
 
     // ── Projection ────────────────────────────────────────────────────────
 
-    /**
-     * Columns always requested, available on all supported API levels (26+).
-     */
+    /** Columns available on all supported API levels (minSdk 26). */
     private val baseProjection = arrayOf(
         MediaStore.Audio.Media._ID,
         MediaStore.Audio.Media.TITLE,
@@ -50,36 +56,27 @@ class MediaStoreAudioScanner(private val context: Context) {
     )
 
     /**
-     * Extra columns available only from API 29 onward.
-     * Appended to [baseProjection] when running on a qualifying device.
+     * Extra columns added in API 29:
+     * - [COL_SAMPLERATE] — raw column name; no named SDK constant exists.
+     * - [MediaStore.Audio.AudioColumns.BITS_PER_SAMPLE] — proper constant on
+     *   the `AudioColumns` interface (parent of `MediaStore.Audio.Media`).
      */
-    private val hiResProjection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        arrayOf(
-            MediaStore.Audio.Media.SAMPLERATE,
-            MediaStore.Audio.Media.BITS_PER_SAMPLE,
-            MediaStore.Audio.Media.CAPTURE_FRAMERATE, // repurposed as channel count — see note below
-        )
-    } else {
-        emptyArray()
-    }
-
-    // NOTE: MediaStore does not expose a dedicated CHANNEL_COUNT column.
-    // The closest proxy available is CAPTURE_FRAMERATE (API 29+), which for
-    // audio files is typically repurposed by device OEMs to store the channel
-    // count. If your target device/OEM does not populate it, channel count
-    // must be read via MediaMetadataRetriever at open-file time. The scanner
-    // falls back to MediaMetadataRetriever for channel count when
-    // CAPTURE_FRAMERATE is 0 or null (see _resolveChannelCount_).
+    @get:RequiresApi(Build.VERSION_CODES.Q)
+    private val hiResProjection = arrayOf(
+        COL_SAMPLERATE,
+        MediaStore.Audio.AudioColumns.BITS_PER_SAMPLE,
+    )
 
     private val fullProjection: Array<String>
-        get() = baseProjection + hiResProjection
+        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            baseProjection + hiResProjection
+        } else {
+            baseProjection
+        }
 
     // ── Selection ─────────────────────────────────────────────────────────
 
-    /**
-     * Exclude ringtones, alarms, notifications, and podcasts so that only
-     * music tracks appear.
-     */
+    /** Exclude ringtones, alarms, notifications, and podcasts. */
     private val selection = buildString {
         append("${MediaStore.Audio.Media.IS_MUSIC} != 0")
         append(" AND ${MediaStore.Audio.Media.DURATION} > 0")
@@ -90,10 +87,10 @@ class MediaStoreAudioScanner(private val context: Context) {
     /**
      * Performs a full MediaStore scan and returns a list of [SongEntity].
      *
-     * Runs entirely on [Dispatchers.IO] — safe to call from any coroutine
+     * Dispatched to [Dispatchers.IO] — safe to call from any coroutine
      * without blocking the main thread.
      *
-     * @return All scanned songs. Empty list if the cursor returns no rows or
+     * @return All scanned songs, or an empty list if no rows are found or
      *   permissions have not been granted.
      */
     suspend fun scan(): List<SongEntity> = withContext(Dispatchers.IO) {
@@ -102,6 +99,7 @@ class MediaStoreAudioScanner(private val context: Context) {
 
         val results = mutableListOf<SongEntity>()
         val nowSeconds = System.currentTimeMillis() / 1_000L
+        val isQ = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
         resolver.query(
             uri,
@@ -112,17 +110,19 @@ class MediaStoreAudioScanner(private val context: Context) {
         )?.use { cursor ->
 
             // ── Column indices ────────────────────────────────────────────
-            val idCol        = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-            val titleCol     = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
-            val artistCol    = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
-            val albumCol     = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
-            val durationCol  = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
-            val dataCol      = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+            val idCol       = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+            val titleCol    = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+            val artistCol   = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+            val albumCol    = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+            val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+            val dataCol     = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
 
-            // Hi-res columns are only present on Q+; getColumnIndex returns -1 when absent.
-            val sampleRateCol  = cursor.getColumnIndex(MediaStore.Audio.Media.SAMPLERATE)
-            val bitDepthCol    = cursor.getColumnIndex(MediaStore.Audio.Media.BITS_PER_SAMPLE)
-            val captureFrameCol = cursor.getColumnIndex(MediaStore.Audio.Media.CAPTURE_FRAMERATE)
+            // Hi-res columns are only in the projection on Q+.
+            // getColumnIndex returns -1 when the column is absent.
+            val sampleRateCol = if (isQ) cursor.getColumnIndex(COL_SAMPLERATE) else -1
+            val bitDepthCol   = if (isQ) cursor.getColumnIndex(
+                MediaStore.Audio.AudioColumns.BITS_PER_SAMPLE
+            ) else -1
 
             // ── Cursor iteration ──────────────────────────────────────────
             while (cursor.moveToNext()) {
@@ -141,15 +141,9 @@ class MediaStoreAudioScanner(private val context: Context) {
                     cursor.getInt(bitDepthCol).takeIf { it > 0 }
                 } else null
 
-                // Channel count: try CAPTURE_FRAMERATE first (OEM convention),
-                // fall back to MediaMetadataRetriever for strict accuracy.
-                val channelCount: Int? = when {
-                    captureFrameCol >= 0 -> {
-                        val v = cursor.getInt(captureFrameCol)
-                        if (v > 0) v else resolveChannelCount(filePath)
-                    }
-                    else -> resolveChannelCount(filePath)
-                }
+                // MediaStore has no standard channel-count column.
+                // MediaMetadataRetriever gives reliable cross-device results.
+                val channelCount = resolveChannelCount(filePath)
 
                 results += SongEntity(
                     id           = id,
@@ -172,31 +166,36 @@ class MediaStoreAudioScanner(private val context: Context) {
     // ── Private helpers ───────────────────────────────────────────────────
 
     /**
-     * Uses [android.media.MediaMetadataRetriever] to read the channel count
-     * directly from the file when MediaStore does not provide it.
+     * Uses [MediaMetadataRetriever] to read the channel count directly from
+     * the file. [MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER] holds
+     * the number of audio channels for audio-only media on Android.
      *
-     * Returns `null` if the value cannot be determined (e.g. file unreadable).
+     * Returns `null` if the value cannot be determined (e.g. file unreadable
+     * or format unsupported).
      */
     private fun resolveChannelCount(filePath: String): Int? = runCatching {
-        android.media.MediaMetadataRetriever().use { retriever ->
-            retriever.setDataSource(filePath)
-            retriever
-                .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER)
+        MediaMetadataRetriever().use { mmr ->
+            mmr.setDataSource(filePath)
+            mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER)
                 ?.toIntOrNull()
-                ?: retriever
-                    .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_NUM_TRACKS)
-                    ?.toIntOrNull()
         }
     }.getOrNull()
 
     /**
-     * Build a content:// URI for a MediaStore audio item — handy for album
+     * Build a `content://` URI for a MediaStore audio item — handy for album
      * art loading via Coil.
      */
     fun artUri(songId: Long): Uri =
         ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, songId)
 
     companion object {
+        /**
+         * Raw MediaStore column name for audio sample rate.
+         * No named constant exists in [MediaStore.Audio.AudioColumns]; the
+         * underlying SQLite column is `"samplerate"` (populated on API 29+).
+         */
+        private const val COL_SAMPLERATE = "samplerate"
+
         private const val UNKNOWN = "<Unknown>"
     }
 }
