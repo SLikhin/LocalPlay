@@ -169,12 +169,20 @@ class MediaStoreAudioScanner(private val context: Context) {
      *
      * Returns `null` if the value cannot be determined (e.g. file unreadable
      * or format unsupported).
+     *
+     * Note: [MediaMetadataRetriever] only implements [AutoCloseable] from
+     * API 29, so `.use {}` is not available below that level. We call
+     * [MediaMetadataRetriever.close] explicitly in a `finally` block instead,
+     * which is safe on all API levels (minSdk 26+).
      */
     private fun resolveChannelCount(filePath: String): Int? = runCatching {
-        MediaMetadataRetriever().use { mmr ->
+        val mmr = MediaMetadataRetriever()
+        try {
             mmr.setDataSource(filePath)
             mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER)
                 ?.toIntOrNull()
+        } finally {
+            mmr.close()
         }
     }.getOrNull()
 
