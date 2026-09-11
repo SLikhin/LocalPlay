@@ -7,7 +7,6 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
-import androidx.annotation.RequiresApi
 import com.localplay.app.data.db.SongEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -56,15 +55,15 @@ class MediaStoreAudioScanner(private val context: Context) {
     )
 
     /**
-     * Extra columns added in API 29:
-     * - [COL_SAMPLERATE] — raw column name; no named SDK constant exists.
-     * - [MediaStore.Audio.AudioColumns.BITS_PER_SAMPLE] — proper constant on
-     *   the `AudioColumns` interface (parent of `MediaStore.Audio.Media`).
+     * Extra columns added in API 29.
+     * Both use raw string literals because neither has a stable named constant
+     * in `MediaStore.Audio.AudioColumns` that survives all kapt configurations:
+     * - `"samplerate"` — sample frequency in Hz.
+     * - `"bits_per_sample"` — bit depth (e.g. 16, 24).
      */
-    @get:RequiresApi(Build.VERSION_CODES.Q)
     private val hiResProjection = arrayOf(
         COL_SAMPLERATE,
-        MediaStore.Audio.AudioColumns.BITS_PER_SAMPLE,
+        COL_BITS_PER_SAMPLE,
     )
 
     private val fullProjection: Array<String>
@@ -120,9 +119,7 @@ class MediaStoreAudioScanner(private val context: Context) {
             // Hi-res columns are only in the projection on Q+.
             // getColumnIndex returns -1 when the column is absent.
             val sampleRateCol = if (isQ) cursor.getColumnIndex(COL_SAMPLERATE) else -1
-            val bitDepthCol   = if (isQ) cursor.getColumnIndex(
-                MediaStore.Audio.AudioColumns.BITS_PER_SAMPLE
-            ) else -1
+            val bitDepthCol   = if (isQ) cursor.getColumnIndex(COL_BITS_PER_SAMPLE) else -1
 
             // ── Cursor iteration ──────────────────────────────────────────
             while (cursor.moveToNext()) {
@@ -190,11 +187,19 @@ class MediaStoreAudioScanner(private val context: Context) {
 
     companion object {
         /**
-         * Raw MediaStore column name for audio sample rate.
-         * No named constant exists in [MediaStore.Audio.AudioColumns]; the
-         * underlying SQLite column is `"samplerate"` (populated on API 29+).
+         * Raw MediaStore column name for audio sample rate (Hz).
+         * No named constant exists in [MediaStore.Audio.AudioColumns];
+         * the underlying SQLite column is `"samplerate"` (API 29+).
          */
         private const val COL_SAMPLERATE = "samplerate"
+
+        /**
+         * Raw MediaStore column name for audio bit depth.
+         * `MediaStore.Audio.AudioColumns.BITS_PER_SAMPLE` exists in the docs
+         * but causes kapt stub-generation failures in some toolchain versions;
+         * the raw column value `"bits_per_sample"` is used instead (API 29+).
+         */
+        private const val COL_BITS_PER_SAMPLE = "bits_per_sample"
 
         private const val UNKNOWN = "<Unknown>"
     }
