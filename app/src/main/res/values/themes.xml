@@ -1,0 +1,5 @@
+<resources>
+    <!-- Minimal platform theme — Compose provides the real theming via MaterialTheme{}.
+         This just controls the window before Compose content is set (splash/status bar). -->
+    <style name="Theme.LocalPlay" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
