@@ -11,11 +11,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.localplay.app.feature.permissions.PermissionScreen
+import com.localplay.app.feature.permissions.rememberAudioPermissionState
 
-/**
- * Phase 0 skeleton entry point.
- * This will be replaced by the real tab-bar/navigation host in Phase 4.
- */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -29,12 +27,21 @@ class MainActivity : ComponentActivity() {
 fun LocalPlayApp() {
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(text = "Hello LocalPlay")
+            val permissionGranted = rememberAudioPermissionState()
+
+            if (permissionGranted.value) {
+                LibraryPlaceholder()
+            } else {
+                PermissionScreen(onPermissionGranted = { permissionGranted.value = true })
             }
         }
+    }
+}
+
+/** Stand-in for the real library screen, which arrives in Phase 4. */
+@Composable
+private fun LibraryPlaceholder() {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Text(text = "Permission granted — library scan comes in Phase 2")
     }
 }
